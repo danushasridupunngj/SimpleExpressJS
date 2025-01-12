@@ -8,7 +8,7 @@ app.use(express.json()); // To handle JSON payloads
 
 // Database connection
 const db = mysql.createConnection({
-  host: "localhost",
+  host: "203.161.41.165",
   user: "danusha_stock",
   password: "Supun878@96",
   database: "danusha_stock",

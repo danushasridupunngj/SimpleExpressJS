@@ -586,7 +586,7 @@ app.get("/api/wastage", (req, res) => {
 
 
 
-const PORT = 5000;
+const PORT = 3457;
 app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
 });

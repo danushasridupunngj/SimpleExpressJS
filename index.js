@@ -19,6 +19,384 @@ const db = mysql.createPool({
 
 
 
+//Production Set 
+app.get("/api/raw-materials-for-production", (req, res) => {
+  db.query("SELECT `raw_materials`.`id` AS raw_id, `raw_materials`.`name` AS raw_name, `po_item`.`p_price` FROM `raw_materials` INNER JOIN `po_item` ON `raw_materials`.`id` = `po_item`.`item_id` WHERE `po_item`.`date` = ( SELECT MAX(`date`) FROM `po_item` WHERE `po_item`.`item_id` = `raw_materials`.`id` );", (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(results);
+  });
+});
+
+app.post("/api/production-set", (req, res) => {
+  const { name, cost, profit,qty,sale_price,wastage, items } = req.body; // 'items' is an array of items
+
+  // Step 1: Insert the PO into the 'po' table
+  db.query(
+    "INSERT INTO `production_set`(`name`, `cost`, `profit`, `qty`, `sale_price`,`wastage`) VALUES (?,?,?,?,?,?)",
+    [name, cost, profit,qty,sale_price,wastage],
+    (err, results) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      // Get the inserted PO ID
+      const po_id = results.insertId;
+
+      // Step 2: Insert the PO items into the 'po_item' table
+      const itemValues = items.map(item => [
+        po_id,
+        item.rawItemId,   // Assuming rawItemId corresponds to 'item_id'
+        item.quantity,
+        item.purchasePrice,
+        item.totalPrice
+      ]);
+
+      // Insert all items in one query
+      const sql = "INSERT INTO production_set_item (p_id, i_id, qty, p_price, total) VALUES ?";
+      db.query(sql, [itemValues], (err, results) => {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+        res.json({ message: "Production Set created with items", po_id });
+      });
+    }
+  );
+});
+
+app.get("/api/production-set", (req, res) => {
+  db.query("SELECT * FROM production_set", (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(results);
+  });
+});
+
+app.get("/api/production-set/:id", (req, res) => {
+  const { id } = req.params;
+
+  // Query to fetch the purchase order details along with the supplier information
+  db.query(
+    "SELECT * FROM `production_set` WHERE `id` = ?",
+    [id],
+    (err, results) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      if (results.length === 0) {
+        return res.status(404).json({ message: "Purchase order not found" });
+      }
+
+      const poData = results[0];  // Assuming results[0] contains the PO data and supplier info
+
+      // Query to fetch the items associated with the purchase order
+      db.query(
+        "SELECT `production_set_item`.`p_price`,`production_set_item`.`total`,`production_set_item`.`qty`,`production_set_item`.`i_id`,`raw_materials`.`name` FROM `production_set_item`,`raw_materials` WHERE `production_set_item`.`p_id`=? AND `raw_materials`.`id` = `production_set_item`.`i_id`;",
+        [id],
+        (err, items) => {
+          if (err) {
+            return res.status(500).json({ error: err.message });
+          }
+
+          // Return the purchase order data along with the associated items and supplier info
+          res.json({
+            po: poData,
+            items: items,  // This could include raw materials, quantities, etc.
+          });
+        }
+      );
+    }
+  );
+});
+
+app.put("/api/production-set/:id", (req, res) => {
+  const productionSetId = req.params.id; // The ID of the production set to update
+  const { name, cost, profit, qty, sale_price, wastage, items } = req.body; // Items is an array
+
+  // Step 1: Update the production_set table
+  db.query(
+    `UPDATE production_set 
+     SET name = ?, cost = ?, profit = ?, sale_price = ?, wastage = ? 
+     WHERE id = ?`,
+    [name, cost, profit, sale_price, wastage, productionSetId],
+    (err, results) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      // Step 2: Delete existing items for the production set
+      db.query(
+        "DELETE FROM production_set_item WHERE p_id = ?",
+        [productionSetId],
+        (err) => {
+          if (err) {
+            return res.status(500).json({ error: err.message });
+          }
+
+          // Step 3: Insert the updated items into production_set_item table
+          const itemValues = items.map(item => [
+            productionSetId,
+            item.rawItemId, // Assuming rawItemId corresponds to 'i_id'
+            item.quantity,
+            item.purchasePrice,
+            item.totalPrice,
+          ]);
+
+          const sql =
+            "INSERT INTO production_set_item (p_id, i_id, qty, p_price, total) VALUES ?";
+          db.query(sql, [itemValues], (err, results) => {
+            if (err) {
+              return res.status(500).json({ error: err.message });
+            }
+            res.json({
+              message: "Production Set and items updated successfully",
+              productionSetId,
+            });
+          });
+        }
+      );
+    }
+  );
+});
+
+
+//Production Generate
+app.get("/api/production-gen-items", (req, res) => {
+  db.query("SELECT ps.id AS production_set_id, ps.name AS production_set_name, FLOOR(MIN(rm.qty / psi.qty)) AS max_production FROM production_set ps JOIN production_set_item psi ON ps.id = psi.p_id JOIN raw_materials rm ON psi.i_id = rm.id WHERE psi.qty > 0 AND rm.qty >= 0 GROUP BY ps.id, ps.name;", (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(results);
+  });
+});
+
+
+app.get("/api/production-gen-stock-vehicle", (req, res) => {
+  db.query("SELECT `production_set`.`id` as production_set_id,`production_set`.`name` as production_set_name,`production_set`.`qty` as max_production FROM `production_set` WHERE `qty`> 0;", (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(results);
+  });
+});
+
+app.get("/api/production-all", (req, res) => {
+  db.query("SELECT `production_gen`.`date`,`production_gen`.`id`,`production_gen`.`qty`,`production_set`.`name` FROM `production_gen`,`production_set` WHERE `production_set`.`id` = `production_gen`.`p_id`;", (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(results);
+  });
+});
+
+app.post("/api/add-production", (req, res) => {
+  const { productionSetId, quantity } = req.body;
+
+  // Fetch the raw materials required for the selected production set
+  db.query(
+    "SELECT i_id, qty FROM production_set_item WHERE p_id = ?",
+    [productionSetId],
+    (err, rawMaterials) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ success: false, message: "Server error while fetching raw materials." });
+      }
+
+      // Fetch the wastage percentage from the production_set table
+      db.query(
+        "SELECT wastage FROM production_set WHERE id = ?",
+        [productionSetId],
+        (err, result) => {
+          if (err) {
+            console.error(err);
+            return res.status(500).json({ success: false, message: "Server error while fetching wastage." });
+          }
+
+          const wastagePercentage = result[0].wastage;
+
+          // Check if sufficient raw materials are available
+          let checkStockPromises = rawMaterials.map(material => {
+            return new Promise((resolve, reject) => {
+              db.query(
+                "SELECT qty FROM raw_materials WHERE id = ?",
+                [material.i_id],
+                (err, stock) => {
+                  if (err) {
+                    reject("Error fetching stock.");
+                  } else if (stock[0].qty < material.qty * quantity) {
+                    reject("Insufficient raw materials for production.");
+                  } else {
+                    resolve(stock[0].qty);
+                  }
+                }
+              );
+            });
+          });
+
+          // Wait for all stock checks
+          Promise.all(checkStockPromises)
+            .then((stocks) => {
+              // Deduct raw materials from stock and handle wastage
+              let deductPromises = rawMaterials.map((material, index) => {
+                const stock = stocks[index];
+                const usedQty = material.qty * quantity;
+                const wastageQty = (wastagePercentage / 100) * usedQty;
+                const totalUsedQty = usedQty - wastageQty;
+                console.log("Supun "+totalUsedQty);
+                return new Promise((resolve, reject) => {
+                  // Deduct raw materials from stock
+                  db.query(
+                    "UPDATE raw_materials SET qty = qty - ? WHERE id = ?",
+                    [totalUsedQty, material.i_id],
+                    (err) => {
+                      if (err) {
+                        reject("Error updating stock.");
+                      } else {
+                        // Insert wastage record into the wastage table
+                        db.query(
+                          "INSERT INTO wastage (item_id, qty, type, comments) VALUES (?, ?, ?, ?)",
+                          [material.i_id, wastageQty, "in", "System Generated in Production"],
+                          (err) => {
+                            if (err) {
+                              reject("Error inserting wastage record.");
+                            } else {
+                              resolve();
+                            }
+                          }
+                        );
+                      }
+                    }
+                  );
+                });
+              });
+
+              // Wait for all stock updates and wastage inserts to complete
+              Promise.all(deductPromises)
+                .then(() => {
+                  // Add production to the production_gen table
+                  db.query(
+                    "INSERT INTO production_gen (p_id, qty) VALUES (?, ?)",
+                    [productionSetId, quantity],
+                    (err, results) => {
+                      if (err) {
+                        console.error(err);
+                        return res.status(500).json({ success: false, message: "Server error while adding production." });
+                      }
+
+                      // Update the production_set table to increase the quantity
+                      db.query(
+                        "UPDATE production_set SET qty = qty + ? WHERE id = ?",
+                        [quantity, productionSetId],
+                        (err) => {
+                          if (err) {
+                            console.error(err);
+                            return res.status(500).json({ success: false, message: "Error updating production set." });
+                          }
+
+                          // Send success response
+                          res.json({ success: true, message: "Production generated successfully." });
+                        }
+                      );
+                    }
+                  );
+                })
+                .catch((error) => {
+                  console.error(error);
+                  res.status(400).json({ success: false, message: error });
+                });
+            })
+            .catch((error) => {
+              console.error(error);
+              res.status(400).json({ success: false, message: error });
+            });
+        }
+      );
+    }
+  );
+});
+
+//Stocks
+app.get("/api/in-house-stock", (req, res) => {
+  db.query("SELECT * FROM `production_set`", (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(results);
+  });
+});
+
+
+//Vehicle
+app.post("/api/vehicle", (req, res) => {
+  const { number, name } = req.body;
+  db.query(
+    "INSERT INTO `vehicle`(`number`, `name`) VALUES (?,?)",
+    [number, name],
+    (err, results) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      res.json({ message: "Vehicle added", id: results.insertId });
+    }
+  );
+});
+
+//Get Vehicle
+app.get("/api/vehicle", (req, res) => {
+  db.query("SELECT * FROM vehicle", (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(results);
+  });
+});
+//Get Single Vehicle 
+app.get("/api/vehicle/:id", (req, res) => {
+  const { id } = req.params; // Get the ID from the URL parameters
+  db.query(
+    "SELECT * FROM `vehicle` WHERE `number` = ?",
+    [id],
+    (err, results) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      if (results.length === 0) {
+        return res.status(404).json({ message: "Raw material not found" });
+      }
+      res.json(results[0]); // Return the first result (should be one if the ID is unique)
+    }
+  );
+});
+//Update Vehicles
+app.put("/api/vehicle/:id", (req, res) => {
+  const { id } = req.params;
+  const { name } = req.body;
+  const {number} = req.body;
+  if (!name) {
+    return res.status(400).json({ error: "Name  are required" });
+  }
+  if (!number) {
+    return res.status(400).json({ error: "Number are required" });
+  }
+  db.query(
+    "UPDATE `vehicle` SET `number`=?,`name`=? WHERE `number` = ?",
+    [number, name, id],
+    (err, results) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      if (results.affectedRows > 0) {
+        res.json({ message: "Raw material updated" });
+      } else {
+        res.status(404).json({ message: "Raw material not found" });
+      }
+    }
+  );
+});
+
+
 // Raw Materials
 app.get("/api/raw-materials", (req, res) => {
   db.query("SELECT * FROM raw_materials", (err, results) => {

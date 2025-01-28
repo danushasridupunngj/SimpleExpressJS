@@ -17,8 +17,6 @@ const db = mysql.createPool({
   queueLimit: 0,
 });
 
-
-
 //Production Set 
 app.get("/api/raw-materials-for-production", (req, res) => {
   db.query("SELECT `raw_materials`.`id` AS raw_id, `raw_materials`.`name` AS raw_name, `po_item`.`p_price` FROM `raw_materials` INNER JOIN `po_item` ON `raw_materials`.`id` = `po_item`.`item_id` WHERE `po_item`.`date` = ( SELECT MAX(`date`) FROM `po_item` WHERE `po_item`.`item_id` = `raw_materials`.`id` );", (err, results) => {
@@ -326,6 +324,95 @@ app.get("/api/in-house-stock", (req, res) => {
     res.json(results);
   });
 });
+
+
+app.get("/api/vehicle_stock-push", (req, res) => {
+  db.query("SELECT `vehicle_stock`.`id`,`vehicle_stock`.`p_id`,`vehicle_stock`.`qty`,`vehicle_stock`.`v_id`,`vehicle_stock`.`type`,`vehicle_stock`.`date`,`production_set`.`name` FROM `vehicle_stock`,`production_set` WHERE `production_set`.`id` = `vehicle_stock`.`p_id`;", (err, results) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(results);
+  });
+});
+
+
+
+app.post("/api/transfer-vehicle-stock", (req, res) => {
+  const { productionSetId, transferQty, vehicleId } = req.body;
+
+  // Fetch the production set to check available quantity
+  db.query(
+    "SELECT qty FROM production_set WHERE id = ?",
+    [productionSetId],
+    (err, result) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ success: false, message: "Server error while fetching production set." });
+      }
+
+      if (result.length === 0) {
+        return res.status(400).json({ success: false, message: "Production set not found." });
+      }
+
+      const availableQty = result[0].qty;
+
+      if (availableQty < transferQty) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Insufficient quantity in production set for transfer." });
+      }
+
+      // Start the stock transfer
+      const newProductionQty = availableQty - transferQty;
+
+      // Update the production set quantity
+      db.query(
+        "UPDATE production_set SET qty = ?, v_qty = v_qty + ? WHERE id = ?",
+        [newProductionQty, transferQty, productionSetId],
+        (err) => {
+          if (err) {
+            console.error(err);
+            return res
+              .status(500)
+              .json({ success: false, message: "Server error while updating production set quantity." });
+          }
+
+          // Update the vehicle stock or insert new entry if it doesn't exist
+          db.query(
+            "INSERT INTO vehicle_stock (p_id, qty, v_id, type) VALUES (?, ?, ?, ?)",
+            [productionSetId, transferQty, vehicleId, "In"],
+            (err) => {
+              if (err) {
+                console.error(err);
+                return res
+                  .status(500)
+                  .json({ success: false, message: "Server error while transferring stock to vehicle." });
+              }
+
+              // Update the vehicle's stock
+              db.query(
+                "UPDATE vehicle SET stock = stock + ? WHERE number = ?",
+                [transferQty, vehicleId],
+                (err) => {
+                  if (err) {
+                    console.error(err);
+                    return res
+                      .status(500)
+                      .json({ success: false, message: "Server error while updating vehicle stock." });
+                  }
+
+                  res.json({ success: true, message: "Stock transferred successfully." });
+                }
+              );
+            }
+          );
+        }
+      );
+    }
+  );
+});
+
+
 
 
 //Vehicle
@@ -967,7 +1054,7 @@ app.get("/api/wastage", (req, res) => {
 
 
 
-const PORT = 3457;
+const PORT = 5000;
 app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
 });
